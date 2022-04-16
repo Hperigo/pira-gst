@@ -1,0 +1,22 @@
+[package]
+name = "pira-gst"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+piralib = {path = "..\\Pira"}
+gstreamer = "*"
+byte-slice-cast = "*"
+image = "*"
+
+gst-player = { package = "gstreamer-player" }
+gst-base = { package = "gstreamer-base" }
+gst-app = { package = "gstreamer-app" }
+gst-video = { package = "gstreamer-video" }
+gst-audio = { package = "gstreamer-audio" }
+
+
+# glib = "*"
+# gst-app = "*"
