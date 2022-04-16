@@ -24,17 +24,16 @@ use std::sync::{Arc, Mutex};
 use byte_slice_cast;
 use image;
 
-type VideoImage = image::ImageBuffer<image::Rgba<u8>, Vec<u8>>;
+type VideoImage = Option<image::ImageBuffer<image::Rgba<u8>, Vec<u8>>>;
 
 struct FrameData {
     shader: glh::GlslProg,
     vao: glh::Vao,
 
     // gstreamer
-    main_loop: gst::glib::MainLoop,
     playbin: gst::Element,
     // bin: gst::Bin,
-    texture: glh::Texture,
+    texture: Option<glh::Texture>,
     image: Arc<Mutex<VideoImage>>,
 }
 
@@ -47,10 +46,7 @@ fn m_setup(app: &mut app::App) -> FrameData {
     let vao = glh::Vao::new_from_attrib(gl, &attribs, glow::TRIANGLE_FAN, &shader).unwrap();
 
     // ------ GSTREAMER ----------
-
-    gst::init();
-    let main_loop = gst::glib::MainLoop::new(None, false);
-
+    gst::init().unwrap();
     let playbin = gst::ElementFactory::make("playbin", Some("playbinsink")).unwrap();
 
     let sink = gst::ElementFactory::make("appsink", Some("videosink")).unwrap();
@@ -65,32 +61,35 @@ fn m_setup(app: &mut app::App) -> FrameData {
     app_sink.set_sync(true);
     app_sink.set_max_lateness(20 * 1000);
 
-    let texture = glh::Texture::new_from_data(
-        gl,
-        None,
-        3840,
-        2160,
-        glh::texture::TextureSettings::default(),
-    );
-
-    let image = Arc::new(Mutex::new(image::RgbaImage::new(3840, 2160)));
+    let image = Arc::new(Mutex::new(None));
+    let image_preroll = image.clone();
     let image_clone = image.clone();
 
     app_sink.set_callbacks(
         gst_app::AppSinkCallbacks::builder()
+            .new_preroll(move |sink| {
+                println!("-------PREROL!!!------");
+                let sample = sink.pull_preroll().unwrap();
+                let info = gst_video::VideoInfo::from_caps(&sample.caps().unwrap()).unwrap();
+
+                println!("info: {} {}", info.width(), info.height());
+                *image_preroll.lock().unwrap() =
+                    Some(image::RgbaImage::new(info.width(), info.height()));
+
+                Ok(gst::FlowSuccess::Ok)
+            })
             .new_sample(move |sink| {
                 let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos).unwrap();
                 let buffer = sample.buffer().unwrap();
                 let info: gst_video::VideoInfo =
                     gst_video::VideoInfo::from_caps(&sample.caps().unwrap()).unwrap();
 
-                //println!("info: {} {}", info.width(), info.height());
-
                 let mem_map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
                 let data = mem_map.as_slice_of::<u8>().unwrap();
 
-                *image_clone.lock().unwrap() =
-                    image::RgbaImage::from_raw(info.width(), info.height(), data.to_vec()).unwrap();
+                *image_clone.lock().unwrap() = Some(
+                    image::RgbaImage::from_raw(info.width(), info.height(), data.to_vec()).unwrap(),
+                );
                 Ok(gst::FlowSuccess::Ok)
             })
             .build(),
@@ -123,35 +122,32 @@ fn m_setup(app: &mut app::App) -> FrameData {
         .set_state(gst::State::Ready)
         .expect("Unable to set the pipeline to the `Playing` state");
 
-    playbin.set_property(
-        "uri",
-        "file:///C:/Users/Henrique/Desktop/SpaceXLaunches4KDemo.mp4",
-    );
-
     // playbin.set_property(
     //     "uri",
-    //     "file:///C:/Users/Henrique/Documents/dev/rust/pira-gst/testsrc.mp4",
+    //     "file:///C:/Users/Henrique/Desktop/SpaceXLaunches4KDemo.mp4",
     // );
+
+    playbin.set_property(
+        "uri",
+        "file:///C:/Users/Henrique/Documents/dev/rust/pira-gst/testsrc.mp4",
+    );
 
     playbin
         .set_state(gst::State::Playing)
         .expect("Unable to set the pipeline to the `Playing` state");
 
     //gst::debug_bin_to_dot_file_with_ts(&playbin.into(), DebugGraphDetails::all(), "pira-gst");
-    let main_loop_clone = main_loop.clone();
 
     playbin
         .bus()
         .unwrap()
         .add_watch(move |_, msg| {
             use gst::MessageView;
-            let main_loop = &main_loop_clone;
             match msg.view() {
                 MessageView::Eos(..) => {
                     println!("received eos");
                     // An EndOfStream event was sent to the pipeline, so we tell our main loop
                     // to stop execution here.
-                    main_loop.quit()
                 }
                 MessageView::Error(err) => {
                     println!(
@@ -160,7 +156,6 @@ fn m_setup(app: &mut app::App) -> FrameData {
                         err.error(),
                         err.debug()
                     );
-                    main_loop.quit();
                 }
                 _ => (),
             };
@@ -172,9 +167,8 @@ fn m_setup(app: &mut app::App) -> FrameData {
     FrameData {
         vao,
         shader,
-        main_loop,
         playbin,
-        texture,
+        texture: None,
         image,
     }
 }
@@ -195,50 +189,60 @@ fn m_update(app: &app::App, data: &mut FrameData, _ui: &egui::Context) {
     let gl = &app.gl;
     let circle_shader = &data.shader;
     let circle_vao = &data.vao;
-    let texture = &data.texture;
-
-    let main_loop = &data.main_loop;
-    main_loop.context().iteration(false);
+    let texture = &mut data.texture;
 
     let lock = data.image.try_lock();
 
     if let Ok(ref mutex) = lock {
-        texture.update(gl, mutex.as_byte_slice());
+        if let Some(data) = mutex.as_ref() {
+            if let Some(texture) = texture {
+                texture.update(gl, data.as_byte_slice());
+            } else {
+                *texture = Some(glh::Texture::new_from_data(
+                    gl,
+                    None,
+                    data.width().try_into().unwrap(),
+                    data.height().try_into().unwrap(),
+                    glh::texture::TextureSettings::default(),
+                ));
+            }
+        }
     }
 
     glh::clear(gl, 1.0, 0.0, 0.4, 1.0);
 
-    circle_shader.bind(gl);
-    let _s_tex = glh::ScopedBind::new(gl, texture);
+    if let Some(texture) = texture {
+        circle_shader.bind(gl);
+        let _s_tex = glh::ScopedBind::new(gl, texture);
 
-    circle_shader.set_orthographic_matrix(
-        gl,
-        [
-            app.input_state.window_size.0 as f32 * 2.0,
-            app.input_state.window_size.1 as f32 * 2.0,
-        ],
-    );
+        circle_shader.set_orthographic_matrix(
+            gl,
+            [
+                app.input_state.window_size.0 as f32 * 2.0,
+                app.input_state.window_size.1 as f32 * 2.0,
+            ],
+        );
 
-    circle_shader.set_view_matrix(gl, &glm::Mat4::identity());
+        circle_shader.set_view_matrix(gl, &glm::Mat4::identity());
 
-    let mut model_view = glm::Mat4::identity();
-    model_view = glm::translate(&model_view, &glm::vec3(0.0, 0.0, 0.0));
-    model_view = glm::scale(&model_view, &glm::vec3(4.0, 4.0, 4.0));
+        let mut model_view = glm::Mat4::identity();
+        model_view = glm::translate(&model_view, &glm::vec3(0.0, 0.0, 0.0));
+        model_view = glm::scale(&model_view, &glm::vec3(4.0, 4.0, 4.0));
 
-    circle_shader.set_uniform_mat4(
-        gl,
-        glh::StockShader::uniform_name_model_matrix(),
-        &model_view,
-    );
-    circle_shader.set_uniform_4f(
-        gl,
-        glh::StockShader::uniform_name_color(),
-        &[1.0, 1.0, 1.0, 1.0],
-    );
+        circle_shader.set_uniform_mat4(
+            gl,
+            glh::StockShader::uniform_name_model_matrix(),
+            &model_view,
+        );
+        circle_shader.set_uniform_4f(
+            gl,
+            glh::StockShader::uniform_name_color(),
+            &[1.0, 1.0, 1.0, 1.0],
+        );
 
-    circle_vao.draw(gl);
-
-    circle_shader.unbind(gl);
+        circle_vao.draw(gl);
+        circle_shader.unbind(gl);
+    }
 }
 
 fn main() {
