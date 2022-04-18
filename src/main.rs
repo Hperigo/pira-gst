@@ -3,7 +3,6 @@ extern crate piralib;
 use byte_slice_cast::AsByteSlice;
 use byte_slice_cast::AsSliceOf;
 use gst::BusSyncReply;
-use gst::DebugGraphDetails;
 use piralib::app;
 use piralib::gl_helper as glh;
 use piralib::glow;
@@ -11,14 +10,11 @@ use piralib::nalgebra_glm as glm;
 
 use piralib::egui;
 use piralib::event;
-use piralib::utils::geo::Circle;
 use piralib::utils::geo::Geometry;
 
 use gst::prelude::*;
 use gstreamer as gst;
 use piralib::utils::geo::Rect;
-use std::ops::Deref;
-use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use byte_slice_cast;
@@ -31,7 +27,8 @@ struct FrameData {
     vao: glh::Vao,
 
     // gstreamer
-    playbin: gst::Element,
+    main_loop: gst::glib::MainLoop,
+
     // bin: gst::Bin,
     texture: Option<glh::Texture>,
     image: Arc<Mutex<VideoImage>>,
@@ -47,7 +44,37 @@ fn m_setup(app: &mut app::App) -> FrameData {
 
     // ------ GSTREAMER ----------
     gst::init().unwrap();
+    let main_loop = gst::glib::MainLoop::new(None, false);
     let playbin = gst::ElementFactory::make("playbin", Some("playbinsink")).unwrap();
+
+    let playbin_d = playbin.downgrade();
+    playbin
+        .bus()
+        .unwrap()
+        .add_watch(move |_bus, msg| {
+            use gst::MessageView;
+            match msg.view() {
+                MessageView::Eos(..) => {
+                    let playbin = playbin_d.upgrade().unwrap();
+                    playbin
+                        .seek_simple(gst::SeekFlags::FLUSH, 0 * gst::ClockTime::SECOND)
+                        .unwrap();
+                    playbin.set_state(gst::State::Playing).unwrap();
+                }
+                MessageView::Error(err) => {
+                    println!(
+                        "Error from {:?}: {} ({:?})",
+                        err.src().map(|s| s.path_string()),
+                        err.error(),
+                        err.debug()
+                    );
+                }
+                _ => (),
+            };
+
+            gst::glib::Continue(true)
+        })
+        .ok();
 
     let sink = gst::ElementFactory::make("appsink", Some("videosink")).unwrap();
     let app_sink = sink
@@ -68,13 +95,15 @@ fn m_setup(app: &mut app::App) -> FrameData {
     app_sink.set_callbacks(
         gst_app::AppSinkCallbacks::builder()
             .new_preroll(move |sink| {
-                println!("-------PREROL!!!------");
                 let sample = sink.pull_preroll().unwrap();
                 let info = gst_video::VideoInfo::from_caps(&sample.caps().unwrap()).unwrap();
 
-                println!("info: {} {}", info.width(), info.height());
-                *image_preroll.lock().unwrap() =
-                    Some(image::RgbaImage::new(info.width(), info.height()));
+                println!("------- PREROLL -------");
+                let image = &mut *image_preroll.lock().unwrap();
+
+                if image.is_none() {
+                    *image = Some(image::RgbaImage::new(info.width(), info.height()));
+                }
 
                 Ok(gst::FlowSuccess::Ok)
             })
@@ -122,10 +151,10 @@ fn m_setup(app: &mut app::App) -> FrameData {
         .set_state(gst::State::Ready)
         .expect("Unable to set the pipeline to the `Playing` state");
 
-    // playbin.set_property(
-    //     "uri",
-    //     "file:///C:/Users/Henrique/Desktop/SpaceXLaunches4KDemo.mp4",
-    // );
+    //playbin.set_property(
+    //    "uri",
+    //    "file:///C:/Users/Henrique/Desktop/SpaceXLaunches4KDemo.mp4",
+    //);
 
     playbin.set_property(
         "uri",
@@ -136,38 +165,11 @@ fn m_setup(app: &mut app::App) -> FrameData {
         .set_state(gst::State::Playing)
         .expect("Unable to set the pipeline to the `Playing` state");
 
-    //gst::debug_bin_to_dot_file_with_ts(&playbin.into(), DebugGraphDetails::all(), "pira-gst");
-
-    playbin
-        .bus()
-        .unwrap()
-        .add_watch(move |_, msg| {
-            use gst::MessageView;
-            match msg.view() {
-                MessageView::Eos(..) => {
-                    println!("received eos");
-                    // An EndOfStream event was sent to the pipeline, so we tell our main loop
-                    // to stop execution here.
-                }
-                MessageView::Error(err) => {
-                    println!(
-                        "Error from {:?}: {} ({:?})",
-                        err.src().map(|s| s.path_string()),
-                        err.error(),
-                        err.debug()
-                    );
-                }
-                _ => (),
-            };
-
-            gst::glib::Continue(true)
-        })
-        .ok();
-
     FrameData {
         vao,
         shader,
-        playbin,
+
+        main_loop,
         texture: None,
         image,
     }
@@ -187,11 +189,13 @@ fn m_event(_app: &mut app::App, _data: &mut FrameData, event: &event::WindowEven
 
 fn m_update(app: &app::App, data: &mut FrameData, _ui: &egui::Context) {
     let gl = &app.gl;
-    let circle_shader = &data.shader;
-    let circle_vao = &data.vao;
+    let quad_shader = &data.shader;
+    let quad_vao = &data.vao;
     let texture = &mut data.texture;
-
     let lock = data.image.try_lock();
+
+    let main_loop = &data.main_loop;
+    main_loop.context().iteration(false);
 
     if let Ok(ref mutex) = lock {
         if let Some(data) = mutex.as_ref() {
@@ -212,10 +216,10 @@ fn m_update(app: &app::App, data: &mut FrameData, _ui: &egui::Context) {
     glh::clear(gl, 1.0, 0.0, 0.4, 1.0);
 
     if let Some(texture) = texture {
-        circle_shader.bind(gl);
+        quad_shader.bind(gl);
         let _s_tex = glh::ScopedBind::new(gl, texture);
 
-        circle_shader.set_orthographic_matrix(
+        quad_shader.set_orthographic_matrix(
             gl,
             [
                 app.input_state.window_size.0 as f32 * 2.0,
@@ -223,25 +227,25 @@ fn m_update(app: &app::App, data: &mut FrameData, _ui: &egui::Context) {
             ],
         );
 
-        circle_shader.set_view_matrix(gl, &glm::Mat4::identity());
+        quad_shader.set_view_matrix(gl, &glm::Mat4::identity());
 
         let mut model_view = glm::Mat4::identity();
         model_view = glm::translate(&model_view, &glm::vec3(0.0, 0.0, 0.0));
         model_view = glm::scale(&model_view, &glm::vec3(4.0, 4.0, 4.0));
 
-        circle_shader.set_uniform_mat4(
+        quad_shader.set_uniform_mat4(
             gl,
             glh::StockShader::uniform_name_model_matrix(),
             &model_view,
         );
-        circle_shader.set_uniform_4f(
+        quad_shader.set_uniform_4f(
             gl,
             glh::StockShader::uniform_name_color(),
             &[1.0, 1.0, 1.0, 1.0],
         );
 
-        circle_vao.draw(gl);
-        circle_shader.unbind(gl);
+        quad_vao.draw(gl);
+        quad_shader.unbind(gl);
     }
 }
 
