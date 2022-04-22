@@ -28,7 +28,7 @@ struct FrameData {
 
     // gstreamer
     main_loop: gst::glib::MainLoop,
-
+    _playbin: gst::Element,
     // bin: gst::Bin,
     texture: Option<glh::Texture>,
     image: Arc<Mutex<VideoImage>>,
@@ -48,33 +48,6 @@ fn m_setup(app: &mut app::App) -> FrameData {
     let playbin = gst::ElementFactory::make("playbin", Some("playbinsink")).unwrap();
 
     let playbin_d = playbin.downgrade();
-    playbin
-        .bus()
-        .unwrap()
-        .add_watch(move |_bus, msg| {
-            use gst::MessageView;
-            match msg.view() {
-                MessageView::Eos(..) => {
-                    let playbin = playbin_d.upgrade().unwrap();
-                    playbin
-                        .seek_simple(gst::SeekFlags::FLUSH, 0 * gst::ClockTime::SECOND)
-                        .unwrap();
-                    playbin.set_state(gst::State::Playing).unwrap();
-                }
-                MessageView::Error(err) => {
-                    println!(
-                        "Error from {:?}: {} ({:?})",
-                        err.src().map(|s| s.path_string()),
-                        err.error(),
-                        err.debug()
-                    );
-                }
-                _ => (),
-            };
-
-            gst::glib::Continue(true)
-        })
-        .ok();
 
     let sink = gst::ElementFactory::make("appsink", Some("videosink")).unwrap();
     let app_sink = sink
@@ -130,6 +103,35 @@ fn m_setup(app: &mut app::App) -> FrameData {
             .build(),
     ));
 
+    playbin
+        .bus()
+        .unwrap()
+        .add_watch(move |_bus, msg| {
+            use gst::MessageView;
+            match msg.view() {
+                MessageView::Eos(..) => {
+                    println!("------EOS-----");
+                    let playbin = playbin_d.upgrade().unwrap();
+                    playbin
+                        .seek_simple(gst::SeekFlags::FLUSH, 0 * gst::ClockTime::SECOND)
+                        .unwrap();
+                    playbin.set_state(gst::State::Playing).unwrap();
+                }
+                MessageView::Error(err) => {
+                    println!(
+                        "Error from {:?}: {} ({:?})",
+                        err.src().map(|s| s.path_string()),
+                        err.error(),
+                        err.debug()
+                    );
+                    gst::glib::Continue(false);
+                }
+                _ => (),
+            };
+            gst::glib::Continue(true)
+        })
+        .ok();
+
     let video_bin = gst::Bin::new(Some("cinder-bin"));
     video_bin.add(&app_sink).unwrap();
 
@@ -151,15 +153,15 @@ fn m_setup(app: &mut app::App) -> FrameData {
         .set_state(gst::State::Ready)
         .expect("Unable to set the pipeline to the `Playing` state");
 
-    //playbin.set_property(
-    //    "uri",
-    //    "file:///C:/Users/Henrique/Desktop/SpaceXLaunches4KDemo.mp4",
-    //);
-
     playbin.set_property(
         "uri",
-        "file:///C:/Users/Henrique/Documents/dev/rust/pira-gst/testsrc.mp4",
+        "file:///C:/Users/Henrique/Desktop/SpaceXLaunches4KDemo.mp4",
     );
+
+    // playbin.set_property(
+    //     "uri",
+    //     "file:///C:/Users/Henrique/Documents/dev/rust/pira-gst/testsrc.mp4",
+    // );
 
     playbin
         .set_state(gst::State::Playing)
@@ -168,7 +170,7 @@ fn m_setup(app: &mut app::App) -> FrameData {
     FrameData {
         vao,
         shader,
-
+        _playbin: playbin,
         main_loop,
         texture: None,
         image,
