@@ -10,6 +10,8 @@ piralib = {path = "..\\Pira"}
 gstreamer = "*"
 byte-slice-cast = "*"
 image = "*"
+anyhow = "*"
+derive_more = "*"
 
 gst-player = { package = "gstreamer-player" }
 gst-base = { package = "gstreamer-base" }
