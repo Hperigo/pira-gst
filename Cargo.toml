@@ -12,11 +12,14 @@ byte-slice-cast = "*"
 image = "*"
 anyhow = "*"
 derive_more = "*"
+libc = "*"
 
 gst-player = { package = "gstreamer-player" }
 gst-base = { package = "gstreamer-base" }
 gst-app = { package = "gstreamer-app" }
 gst-video = { package = "gstreamer-video" }
+gst-gl = { package = "gstreamer-gl" }
+#gst-gl-egl = { package = "gstreamer-gl-egl" }
 gst-audio = { package = "gstreamer-audio" }
 
 

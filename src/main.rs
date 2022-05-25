@@ -33,6 +33,7 @@ struct FrameData {
     shader: glh::GlslProg,
     vao: glh::Vao,
     texture: Option<glh::Texture>,
+    image: Arc<Mutex<glh::Texture>>,
 
     //GSTREAMER
     pipeline: gst::Pipeline,
@@ -41,7 +42,7 @@ struct FrameData {
     bus: gst::Bus,
 }
 
-fn create_pipeline() -> Result<(), Error> {
+fn create_pipeline() -> Result<(gst::Pipeline, gst_app::AppSink, gst::Element), Error> {
     let pipeline = gst::Pipeline::new(None);
     let src = gst::ElementFactory::make("videotestsrc", None)
         .map_err(|_| MissingElement("videotestsrc"))?;
@@ -62,47 +63,61 @@ fn create_pipeline() -> Result<(), Error> {
         .build();
     appsink.set_caps(Some(&caps));
 
-    if let Some(gl_element) = gl_element {
-        let glupload =
-            gst::ElementFactory::make("glupload", None).map_err(|_| MissingElement("glupload"))?;
+    let sink =
+        gst::ElementFactory::make("glsinkbin", None).map_err(|_| MissingElement("glsinkbin"))?;
 
-        pipeline.add_many(&[&src, &glupload])?;
-        pipeline.add(gl_element)?;
-        pipeline.add(&appsink)?;
+    sink.set_property("sink", &appsink);
 
-        src.link(&glupload)?;
-        glupload.link(gl_element)?;
-        gl_element.link(&appsink)?;
+    pipeline.add_many(&[&src, &sink])?;
+    src.link(&sink)?;
 
-        Ok((pipeline, appsink, glupload))
-    } else {
-        let sink = gst::ElementFactory::make("glsinkbin", None)
-            .map_err(|_| MissingElement("glsinkbin"))?;
-
-        sink.set_property("sink", &appsink);
-
-        pipeline.add_many(&[&src, &sink])?;
-        src.link(&sink)?;
-
-        // get the glupload element to extract later the used context in it
-        let mut iter = sink.dynamic_cast::<gst::Bin>().unwrap().iterate_elements();
-        let glupload = loop {
-            match iter.next() {
-                Ok(Some(element)) => {
-                    if "glupload" == element.factory().unwrap().name() {
-                        break Some(element);
-                    }
+    // get the glupload element to extract later the used context in it
+    let mut iter = sink.dynamic_cast::<gst::Bin>().unwrap().iterate_elements();
+    let glupload = loop {
+        match iter.next() {
+            Ok(Some(element)) => {
+                if "glupload" == element.factory().unwrap().name() {
+                    break Some(element);
                 }
-                Err(gst::IteratorError::Resync) => iter.resync(),
-                _ => break None,
             }
-        };
+            Err(gst::IteratorError::Resync) => iter.resync(),
+            _ => break None,
+        }
+    };
 
-        Ok((pipeline, appsink, glupload.unwrap()))
-    }
+    let callbacks = gst_app::AppSinkCallbacks::builder()
+        .new_sample(move |appsink| {
+            let sample = appsink.pull_sample().unwrap();
+            println!("Sample!");
+            //let buffer = sample.buffer().unwrap();
+            // let info: gst_video::VideoInfo =
+            //     gst_video::VideoInfo::from_caps(&sample.caps().unwrap()).unwrap();
+
+            // let mem = buffer.peek_memory(0);
+
+            // unsafe {
+            //     let mmm = mem.as_ptr() as *const gst_gl::GLMemoryRef;
+            //     println!("gl-mem: {:?}", (*mmm).texture_id());
+
+            //     image_clone.lock().unwrap().handle = Some(
+            //         std::mem::transmute::<u32, glow::Texture>((*mmm).texture_id()),
+            //     );
+            //}
+
+            Result::Ok(gst::FlowSuccess::Ok)
+        })
+        .build();
+
+    //appsink.set_callbacks(callbacks);
+
+    Ok((pipeline, appsink, glupload.unwrap()))
 }
 
 fn m_setup(app: &mut app::App) -> FrameData {
+    use gst_gl::prelude::ContextGLExt;
+    use gst_gl::prelude::GLContextExt;
+    use piralib::glutin::platform::ContextTraitExt;
+
     let gl = &app.gl;
     let attribs = Rect::new(0.0, 0.0, 720.0, 460.0)
         .texture_coords()
@@ -110,10 +125,102 @@ fn m_setup(app: &mut app::App) -> FrameData {
     let shader = glh::StockShader::new().texture(false).build(gl);
     let vao = glh::Vao::new_from_attrib(gl, &attribs, glow::TRIANGLE_FAN, &shader).unwrap();
 
+    // GSTREAMER ---------
+
+    let (pipeline, appsink, glupload) = create_pipeline().unwrap();
+    let bus = pipeline
+        .bus()
+        .expect("Pipeline without bus. Shouldn't happen!");
+
+    //let handle =
+    // let gl_display = unsafe {
+    //     let egl = app.context.get_egl_display().unwrap();
+    //     gst_gl_egl::GLDisplayEGL::with_egl_display(egl as usize)
+    //         .unwrap()
+    //         .upcast::<gst_gl::GLDisplay>()
+    // };
+
+    let gl_display = gst_gl::GLDisplay::new();
+
+    let mut shared_ctx_opt = None;
+
+    match unsafe { app.context.context().raw_handle() } {
+        piralib::glutin::platform::windows::RawHandle::Wgl(wgl_handle) => {
+            println!("WGL");
+
+            unsafe {
+                let raw_handle = wgl_handle as libc::uintptr_t;
+
+                shared_ctx_opt = gst_gl::GLContext::new_wrapped(
+                    &gl_display,
+                    raw_handle,
+                    gst_gl::GLPlatform::WGL,
+                    gst_gl::GLAPI::OPENGL3,
+                )
+            };
+        }
+        _ => (),
+    };
+
+    let shared_ctx = shared_ctx_opt.unwrap();
+
+    shared_ctx
+        .activate(true)
+        .expect("Couldn't activate wrapped GL context");
+
+    shared_ctx.fill_info().unwrap();
+    let gl_context = shared_ctx.clone();
+
+    #[allow(clippy::single_match)]
+    bus.set_sync_handler(move |_, msg| {
+        match msg.view() {
+            gst::MessageView::NeedContext(ctxt) => {
+                let context_type = ctxt.context_type();
+                if context_type == *gst_gl::GL_DISPLAY_CONTEXT_TYPE {
+                    if let Some(el) = msg.src().map(|s| s.downcast::<gst::Element>().unwrap()) {
+                        let context = gst::Context::new(context_type, true);
+                        context.set_gl_display(&gl_display);
+                        el.set_context(&context);
+                    }
+                }
+                if context_type == "gst.gl.app_context" {
+                    if let Some(el) = msg.src().map(|s| s.downcast::<gst::Element>().unwrap()) {
+                        let mut context = gst::Context::new(context_type, true);
+                        {
+                            let context = context.get_mut().unwrap();
+                            let s = context.structure_mut();
+                            s.set("context", &gl_context);
+                        }
+                        el.set_context(&context);
+                    }
+                }
+            }
+            _ => (),
+        }
+
+        gst::BusSyncReply::Pass
+    });
+
+    let image = Arc::new(Mutex::new(glh::Texture {
+        handle: None,
+        width: 320,
+        height: 240,
+        settings: glh::texture::TextureSettings::default(),
+    }));
+    let image_clone = image.clone();
+
+    pipeline.set_state(gst::State::Playing).unwrap();
+
     FrameData {
         vao,
         shader,
         texture: None,
+        image,
+
+        pipeline,
+        appsink,
+        glupload,
+        bus,
     }
 }
 
