@@ -13,6 +13,7 @@ image = "*"
 anyhow = "*"
 derive_more = "*"
 libc = "*"
+glutin_wgl_sys  = "*"
 
 gst-player = { package = "gstreamer-player" }
 gst-base = { package = "gstreamer-base" }

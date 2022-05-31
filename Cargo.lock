@@ -2303,6 +2303,7 @@ dependencies = [
  "anyhow",
  "byte-slice-cast",
  "derive_more",
+ "glutin_wgl_sys",
  "gstreamer",
  "gstreamer-app",
  "gstreamer-audio",

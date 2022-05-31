@@ -15,6 +15,7 @@ use piralib::utils::geo::Geometry;
 use gst::prelude::*;
 use gstreamer as gst;
 use piralib::utils::geo::Rect;
+use std::ptr::null;
 use std::sync::{Arc, Mutex};
 
 use byte_slice_cast;
@@ -144,23 +145,33 @@ fn m_setup(app: &mut app::App) -> FrameData {
 
     let mut shared_ctx_opt = None;
 
+    let (prev_device, prev_hglrc) = unsafe {
+        let prev_device = glutin_wgl_sys::wgl::GetCurrentDC();
+        let prev_hglrc = glutin_wgl_sys::wgl::GetCurrentContext();
+
+        (prev_device, prev_hglrc)
+    };
+
     match unsafe { app.context.context().raw_handle() } {
         piralib::glutin::platform::windows::RawHandle::Wgl(wgl_handle) => {
-            println!("WGL");
-
             unsafe {
                 let raw_handle = wgl_handle as libc::uintptr_t;
+                glutin_wgl_sys::wgl::MakeCurrent(null(), null());
 
                 shared_ctx_opt = gst_gl::GLContext::new_wrapped(
                     &gl_display,
                     raw_handle,
                     gst_gl::GLPlatform::WGL,
-                    gst_gl::GLAPI::OPENGL3,
-                )
+                    gst_gl::GLAPI::OPENGL,
+                );
+
+                glutin_wgl_sys::wgl::MakeCurrent(prev_device, prev_hglrc);
             };
         }
         _ => (),
     };
+
+    unsafe {}
 
     let shared_ctx = shared_ctx_opt.unwrap();
 
